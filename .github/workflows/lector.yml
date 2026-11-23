@@ -1,0 +1,48 @@
+name: Lector de dorsales
+
+on:
+  # Every 30 minutes: imports new Drive photos and reads their bibs and faces.
+  # A run with nothing to do ends in about a minute.
+  schedule:
+    - cron: "*/30 * * * *"
+  # "Run workflow" button, to start it right away after uploading a race
+  workflow_dispatch:
+
+# One reader at a time; a run that is due while another works waits its turn
+concurrency:
+  group: lector
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  leer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Leer dorsales
+        run: node lector.mjs --una-vez
+        env:
+          LECTOR_SITIO: ${{ secrets.LECTOR_SITIO }}
+          LECTOR_CLAVE: ${{ secrets.LECTOR_CLAVE }}
+          LECTOR_PARALELO: "4"
+          # Stops taking new photos after 5 h; the next run continues
+          LECTOR_MINUTOS: "300"
+      # GitHub pauses scheduled tasks in repositories with no changes for 60 days:
+      # an empty commit every 45 days keeps it running
+      - name: Mantener activa la tarea
+        if: github.event_name == 'schedule'
+        run: |
+          if [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt 3888000 ]; then
+            git config user.name "lector"
+            git config user.email "lector@users.noreply.github.com"
+            git commit --allow-empty -m "Mantener activa la tarea"
+            git push
+          fi

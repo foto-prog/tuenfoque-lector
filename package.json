@@ -1,0 +1,21 @@
+{
+  "name": "tuenfoque-lector",
+  "private": true,
+  "description": "Lector de dorsales y caras de Tu Enfoque, en GitHub Actions",
+  "type": "module",
+  "dependencies": {
+    "@gutenye/ocr-node": "1.4.9",
+    "@tensorflow/tfjs": "4.22.0",
+    "@tensorflow/tfjs-backend-wasm": "4.22.0",
+    "@vladmandic/face-api": "1.7.15",
+    "onnxruntime-node": "1.30.0",
+    "sharp": "0.35.5"
+  },
+  "overrides": {
+    "@gutenye/ocr-node": {
+      "sharp": "$sharp",
+      "onnxruntime-node": "$onnxruntime-node"
+    }
+  },
+  "engines": { "node": ">=20" }
+}
