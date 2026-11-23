@@ -32,6 +32,8 @@ jobs:
         env:
           LECTOR_SITIO: ${{ secrets.LECTOR_SITIO }}
           LECTOR_CLAVE: ${{ secrets.LECTOR_CLAVE }}
+          # Second reading of bibs with NVIDIA's vision model (empty = OCR only)
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           LECTOR_PARALELO: "4"
           # Stops taking new photos after 5 h; the next run continues
           LECTOR_MINUTOS: "300"

@@ -344,12 +344,155 @@ function distinctiveness(descriptor) {
   return bg.reduce((s, b) => s + faceDistance(descriptor, b), 0) / bg.length;
 }
 
+// scripts/lector-ia.ts
+import sharp3 from "sharp";
+var MODEL = process.env.NVIDIA_MODELO ?? "nvidia/nemotron-3.5-super-vl-120b-a12b";
+var URL2 = "https://integrate.api.nvidia.com/v1/chat/completions";
+var PROMPT = `Foto de una carrera deportiva. Para cada corredor visible, lee el n\xFAmero de su dorsal (bib).
+Responde SOLO JSON, sin texto extra:
+{"dorsales":[{"numero":"12345","claro":true,"x":0.42,"y":0.55}]}
+- "numero": solo los d\xEDgitos grandes del dorsal.
+- "claro": true si todos los d\xEDgitos se ven n\xEDtidos; false si est\xE1 borroso, tapado o cortado.
+- "x": posici\xF3n horizontal del centro del dorsal en la foto, de 0 (borde izquierdo) a 1 (borde derecho).
+- "y": posici\xF3n vertical del centro del dorsal, de 0 (arriba) a 1 (abajo).
+No incluyas n\xFAmeros de la camiseta, publicidad, a\xF1os ni fechas. Si no hay dorsales, responde {"dorsales":[]}.`;
+var wait = (ms) => new Promise((r) => setTimeout(r, ms));
+async function modelBibs(photo) {
+  if (!process.env.NVIDIA_API_KEY) return null;
+  const image = await sharp3(photo).rotate().resize(1600, 1600, { fit: "inside" }).jpeg({ quality: 85 }).toBuffer();
+  return ask(PROMPT, image, parse);
+}
+var ZOOM_PROMPT = `Recorte ampliado de una foto de carrera. Busca el dorsal: el cartel de papel o tela con el n\xFAmero del corredor, sujeto al pecho, la cintura o la bicicleta.
+Si puedes leer con seguridad todos los d\xEDgitos de ese n\xFAmero, responde SOLO JSON {"numero":"12345"}.
+Si el n\xFAmero est\xE1 cortado o tapado en parte, o solo hay n\xFAmeros estampados en la ropa (espalda o pecho de la camiseta), publicidad o fechas, responde {"numero":null}. No adivines d\xEDgitos.`;
+async function confirmZoomed(photo, m) {
+  if (!process.env.NVIDIA_API_KEY || m.x === null || m.y === null) return false;
+  const img = sharp3(photo).rotate();
+  const meta = await img.metadata();
+  const turned = (meta.orientation ?? 1) >= 5;
+  const W = (turned ? meta.height : meta.width) ?? 0;
+  const H = (turned ? meta.width : meta.height) ?? 0;
+  if (!W || !H) return false;
+  const side = Math.min(W, H, Math.max(400, Math.round(Math.min(W, H) * 0.3)));
+  const left = Math.min(Math.max(0, Math.round(m.x * W - side / 2)), W - side);
+  const top = Math.min(Math.max(0, Math.round(m.y * H - side / 2)), H - side);
+  const crop = await sharp3(await img.toBuffer()).extract({ left, top, width: side, height: side }).resize(1024, 1024, { fit: "inside" }).jpeg({ quality: 90 }).toBuffer();
+  const again = await ask(ZOOM_PROMPT, crop, (text) => {
+    const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
+    try {
+      const n = JSON.parse(json).numero;
+      return { n: n === null || n === void 0 ? "" : String(n).replace(/\D/g, "").replace(/^0+(?=\d)/, "") };
+    } catch {
+      return null;
+    }
+  });
+  return again?.n === m.bib;
+}
+async function ask(prompt, image, read) {
+  const key = process.env.NVIDIA_API_KEY;
+  if (!key) return null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const res = await fetch(URL2, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: MODEL,
+          temperature: 0,
+          // The model reasons before answering: room for both
+          max_tokens: 8e3,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: `data:image/jpeg;base64,${image.toString("base64")}` } }
+              ]
+            }
+          ]
+        }),
+        signal: AbortSignal.timeout(12e4)
+      });
+      if (res.status === 429 || res.status >= 500) {
+        await wait(5e3 * (attempt + 1));
+        continue;
+      }
+      if (!res.ok) return null;
+      const body = await res.json();
+      const answer = read(body.choices?.[0]?.message?.content ?? "");
+      if (answer) return answer;
+      await wait(2e3);
+    } catch {
+      await wait(5e3 * (attempt + 1));
+    }
+  }
+  return null;
+}
+function parse(text) {
+  const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
+  try {
+    const list = JSON.parse(json).dorsales;
+    if (!Array.isArray(list)) return null;
+    const out = /* @__PURE__ */ new Map();
+    for (const d of list) {
+      const bib = String(d.numero ?? "").replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+      if (!/^\d{1,6}$/.test(bib)) continue;
+      const unit = (v) => typeof v === "number" && v >= 0 && v <= 1 ? v : null;
+      out.set(bib, { bib, clear: d.claro !== false, x: unit(d.x), y: unit(d.y) });
+    }
+    return [...out.values()];
+  } catch {
+    return null;
+  }
+}
+function faceAt(m, faces, taken) {
+  if (m.x === null || m.y === null) return null;
+  const { x, y } = m;
+  const near = faces.map((f, i) => ({ i, f, d: Math.abs(f.x + f.w / 2 - x) })).filter(({ i, f, d }) => !taken.has(i) && d < Math.max(0.05, f.w * 1.2) && y > f.y + f.h && y < f.y + f.h * 7).sort((a, b) => a.d - b.d);
+  if (!near.length) return null;
+  if (near.length > 1 && near[1].d - near[0].d < 0.02) return null;
+  return near[0].i;
+}
+function looksLikeMisread(a, b) {
+  if (a.length === b.length) return [...a].filter((ch, i) => ch !== b[i]).length === 1;
+  return a.length >= 3 && b.length >= 3 && (a.includes(b) || b.includes(a));
+}
+async function mergeReadings(ocr, model, faces, ignore, confirm) {
+  if (!model) return ocr;
+  const bibs = new Map(ocr.bibs.map((b) => [b.bib, { ...b }]));
+  const maybe = new Map(ocr.maybe.map((b) => [b.bib, b]));
+  const taken = new Set(ocr.bibs.map((b) => b.face).filter((f) => f !== null));
+  const tie = (m) => {
+    const face = faceAt(m, faces, taken);
+    if (face !== null) taken.add(face);
+    return face;
+  };
+  for (const m of model) {
+    const known = bibs.get(m.bib);
+    if (!known) continue;
+    known.confidence = Math.max(known.confidence, 0.97);
+    known.face ??= tie(m);
+  }
+  for (const m of model) {
+    if (ignore.includes(m.bib) || bibs.has(m.bib)) continue;
+    const unsure = maybe.get(m.bib);
+    if ([...bibs.keys()].some((b) => looksLikeMisread(b, m.bib))) continue;
+    if (m.clear && await confirm(m)) {
+      bibs.set(m.bib, { bib: m.bib, confidence: unsure ? 0.9 : 0.8, face: unsure?.face ?? tie(m) });
+      maybe.delete(m.bib);
+    } else if (!unsure) {
+      maybe.set(m.bib, { bib: m.bib, confidence: 0.5, face: null });
+    }
+  }
+  return { bibs: [...bibs.values()], maybe: [...maybe.values()] };
+}
+
 // scripts/lector-pc.ts
-var VERSION = "1.2.0";
+var VERSION = "1.3.0";
 var NEIGHBOURS = 3;
 var here = path2.dirname(fileURLToPath(import.meta.url));
 var log = (...a) => console.log((/* @__PURE__ */ new Date()).toLocaleString("es-VE"), "\xB7", ...a);
-var wait = (ms) => new Promise((r) => setTimeout(r, ms));
+var wait2 = (ms) => new Promise((r) => setTimeout(r, ms));
 function readConfig(text) {
   const literal = text.replace(
     /("carpeta"\s*:\s*")([^"]*)(")/,
@@ -368,7 +511,7 @@ function readConfig(text) {
     log(`No encuentro config.json en ${here}`);
     log("Copia lector.mjs, package.json y los .bat a la carpeta del agente (la que tiene tu config.json),");
     log("por ejemplo C:\\TuEnfoque\\agente-fotos, y abre iniciar-lector.bat desde ah\xED.");
-    await wait(10 * 6e4);
+    await wait2(10 * 6e4);
     process.exit(1);
   }
   const cfg = fromEnv ? {
@@ -441,6 +584,7 @@ function readConfig(text) {
       return [...out];
     };
     let done = 0;
+    let withModel = 0;
     let failed = 0;
     let missing = 0;
     const started = Date.now();
@@ -455,10 +599,18 @@ function readConfig(text) {
             continue;
           }
           const faces = await detectFaces(photo);
-          const read = await readBibsDetailed(
-            photo,
+          const ignore = c.anio ? [c.anio] : [];
+          const [ocr, model] = await Promise.all([
+            readBibsDetailed(photo, faces.map((x) => x.box), { ignore, expect: near(i) }),
+            modelBibs(photo).catch(() => null)
+          ]);
+          if (model) withModel++;
+          const read = await mergeReadings(
+            ocr,
+            model,
             faces.map((x) => x.box),
-            { ignore: c.anio ? [c.anio] : [], expect: near(i) }
+            ignore,
+            (m) => confirmZoomed(photo, m).catch(() => false)
           );
           await site("/api/lector/resultado", {
             id: f.id,
@@ -498,11 +650,15 @@ function readConfig(text) {
       }
     }
     if (done || failed || confirmed)
-      log(`${c.slug}: ${done} le\xEDdas, ${failed} con error, ${confirmed} dorsales confirmados por fotos vecinas`);
+      log(
+        `${c.slug}: ${done} le\xEDdas${process.env.NVIDIA_API_KEY ? ` (${withModel} tambi\xE9n con IA)` : ""}, ${failed} con error, ${confirmed} dorsales confirmados por fotos vecinas`
+      );
     if (missing) log(`${c.slug}: ${missing} fotos no est\xE1n en ${ROOT} (\xBFfotos movidas?)`);
     return done;
   }
-  log(`Lector de dorsales ${VERSION} \xB7 ${fromEnv ? "fotos de Drive" : `fotos en ${ROOT}`} \xB7 ${PARALLEL} a la vez`);
+  log(
+    `Lector de dorsales ${VERSION} \xB7 ${fromEnv ? "fotos de Drive" : `fotos en ${ROOT}`} \xB7 ${PARALLEL} a la vez${process.env.NVIDIA_API_KEY ? " \xB7 con IA de NVIDIA" : ""}`
+  );
   for (; ; ) {
     if (Date.now() >= deadline) {
       log("Tiempo de esta vuelta agotado: lo que falte se lee en la pr\xF3xima");
@@ -520,12 +676,12 @@ function readConfig(text) {
         log("Nada pendiente por leer");
         return;
       }
-      if (!read) await wait(6e4);
+      if (!read) await wait2(6e4);
     } catch (e) {
       log("sin conexi\xF3n con la web, reintento en 1 minuto:", e instanceof Error ? e.message : e);
       if (once) process.exitCode = 1;
       if (once) return;
-      await wait(6e4);
+      await wait2(6e4);
     }
   }
 })();

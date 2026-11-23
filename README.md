@@ -10,7 +10,9 @@ encuentren sus fotos en www.tuenfoquee.com. Corre solo en GitHub Actions cada 30
 Para que empiece al momento tras subir una carrera: pestaña **Actions** → **Lector de dorsales** → **Run workflow**.
 
 Secretos (Settings → Secrets and variables → Actions): `LECTOR_SITIO` (la dirección de la web)
-y `LECTOR_CLAVE` (la clave de sincronizar, igual a `CRON_SECRET` en Vercel). Este repositorio no
+`LECTOR_CLAVE` (la clave de sincronizar, igual a `CRON_SECRET` en Vercel) y, opcional,
+`NVIDIA_API_KEY`: un modelo de visión de NVIDIA da una segunda lectura de dorsales; los que solo
+él ve se guardan cuando un segundo vistazo ampliado lo confirma. Este repositorio no
 guarda claves ni fotos.
 
 `lector.mjs` se genera desde el proyecto de la web con `npm run lector:build`.
